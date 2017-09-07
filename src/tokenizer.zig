@@ -357,7 +357,6 @@ const Tokenizer = struct {
     //
     // TODO: Use big integer generally improve here.
     // TODO: Handle float seperately.
-    // TODO: Return the integer value and allow caller to handle it.
     fn processNumber(self: &Self, comptime radix: u8, init_value: ?u8) -> %u128 {
         var number: u128 = if (init_value) |v| {
             %return getDigitValueForRadix(radix, v)
@@ -455,17 +454,53 @@ const Tokenizer = struct {
                 self.processCharCode(16, 6, true)
             },
 
-            // TODO: Push the associated character to the right buffer
-            'n', 'r', '\\', 't', '\'', '"' => |c| {
-                self.bump(1);
-                // push(c)
-                u32(c)
-            },
+            'n'  => { self.bump(1); u32('\n') },
+            'r'  => { self.bump(1); u32('\r') },
+            '\\' => { self.bump(1); u32('\\') },
+            't'  => { self.bump(1); u32('\t') },
+            '\'' => { self.bump(1); u32('\'') },
+            '"'  => { self.bump(1); u32('\"') },
 
             else => {
                 @panic("unexpected character");
             }
         }
+    }
+
+    /// Process a string, returning the encountered characters.
+    fn processString(self: &Self) -> %ArrayList(u8) {
+        var literal = ArrayList(u8).init(&debug.global_allocator);
+        %defer literal.deinit();
+
+        while (true) {
+            switch (self.peek(0)) {
+                '"' => {
+                    self.bump(1);
+                    break;
+                },
+
+                '\n' => {
+                    return error.NewlineInStringLiteral;
+                },
+
+                '\\' => {
+                    self.bump(1);
+                    const value = %return self.processStringEscape();
+                    // push(value)
+                },
+
+                0 => {
+                    @panic("eof while parsing string literal!");
+                },
+
+                else => |c| {
+                    self.bump(1);
+                    %return literal.append(c);
+                },
+            }
+        }
+
+        literal
     }
 
     /// Construct a new tokenization instance and return it in its completed state.
@@ -557,37 +592,8 @@ const Tokenizer = struct {
 
                 '"' => {
                     t.beginToken();
-
-                    var literal = ArrayList(u8).init(&debug.global_allocator);
-
-                    while (true) {
-                        switch (t.peek(0)) {
-                            '"' => {
-                                t.bump(1);
-                                break;
-                            },
-
-                            '\n' => {
-                                return error.NewlineInStringLiteral;
-                            },
-
-                            '\\' => {
-                                t.bump(1);
-                                const value = %return t.processStringEscape();
-                                // push(value)
-                            },
-
-                            0 => {
-                                @panic("eof while parsing string literal!");
-                            },
-
-                            else => |c| {
-                                t.bump(1);
-                                %return literal.append(c);
-                            },
-                        }
-                    }
-
+                    const literal = %return t.processString();
+                    // push(literal)
                     %return t.setEndToken(TokenId.StringLiteral);
                 },
 
@@ -708,7 +714,6 @@ const Tokenizer = struct {
                                 }
                             }
 
-                            // TODO: Merge adjacent comments at a later level
                             %return t.setEndToken(comment_id);
                         },
 
@@ -751,7 +756,11 @@ const Tokenizer = struct {
                     t.beginToken();
                     switch (t.peek(0)) {
                         '"' => {
-                            // Process a raw symbol until the closing
+                            t.beginToken();
+                            t.bump(1);
+                            const literal = %return t.processString();
+                            // push(literal)
+                            %return t.setEndToken(TokenId.Symbol);
                         },
 
                         else => {
@@ -945,7 +954,6 @@ const Tokenizer = struct {
                             const value = %return t.processStringEscape();
                             // push(value)
 
-                            // TODO: Should we handle end in string escape?
                             if (t.peek(0) != '\'') {
                                 return error.ExtraCharLiteralData;
                             } else {
@@ -974,12 +982,11 @@ const Tokenizer = struct {
                             while (t.next()) |c| {
                                 if (c == '\n') {
                                     break;
+                                } else {
+                                    // push(c)
                                 }
                             }
 
-                            // Merge adjacent literals at a later level.
-                            // We don't want to do this for standard literals hence the different
-                            // type.
                             %return t.setEndToken(TokenId.MultiLineStringLiteral);
                         },
 
