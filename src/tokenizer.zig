@@ -213,7 +213,20 @@ pub const TokenData = enum {
     InternPoolRef: []const u8,
     Integer: u128,
     Char: u8,
+    Error: error,
 };
+
+fn printCharEscaped(c: u8) -> %void {
+    const printf = std.io.stdout.printf;
+
+    switch (c) {
+        '\r' => %return printf("\\r"),
+        '\t' => %return printf("\\t"),
+        '\n' => %return printf("\\n"),
+        '\\' => %return printf("\\\\"),
+        else => %return printf("{c}", c),
+    }
+}
 
 /// A Token consists of a type/id and an associated location/span within the source file.
 pub const Token = struct {
@@ -233,9 +246,20 @@ pub const Token = struct {
         if (self.data) |inner| {
             %return printf(" (");
             switch (inner) {
-                TokenData.InternPoolRef => |p_ref| %return printf("{}", p_ref),
-                TokenData.Integer       => |i| %return printf("{}", i),
-                TokenData.Char          => |c| %return printf("{c}", c),
+                TokenData.InternPoolRef => |p_ref| {
+                    for (p_ref) |c| {
+                        %return printCharEscaped(c);
+                    }
+                },
+                TokenData.Integer => |i| {
+                    %return printf("{}", i);
+                },
+                TokenData.Char => |c| {
+                    %return printCharEscaped(c);
+                },
+                TokenData.Error => |e| {
+                    %return printf("{}", @errorName(e));
+                },
             }
             %return printf(")");
         }
@@ -258,6 +282,7 @@ error InvalidCharacter;
 error InvalidCharacterAfterBackslash;
 error MissingCharLiteralData;
 error ExtraCharLiteralData;
+error Consumed;
 
 fn u8eql(a: []const u8, b: []const u8) -> bool {
     std.mem.eql(u8, a, b)
@@ -272,6 +297,8 @@ pub const Tokenizer = struct {
     tokens: ArrayList(Token),
     lines: ArrayList(usize),
     intern_pool: InternPool,
+    errors: ArrayList(Token),
+    consumed: bool,
 
     c_token: ?Token,
     c_byte: usize,
@@ -285,6 +312,8 @@ pub const Tokenizer = struct {
             .tokens = ArrayList(Token).init(&debug.global_allocator),
             .lines = ArrayList(usize).init(&debug.global_allocator),
             .intern_pool = InternPool.init(&debug.global_allocator),
+            .errors = ArrayList(Token).init(&debug.global_allocator),
+            .consumed = false,
 
             .c_token = null,
             .c_byte = 0,
@@ -303,7 +332,7 @@ pub const Tokenizer = struct {
     /// Returns the next byte in the buffer and advances our position.
     ///
     /// If we have reached the end of the stream, null is returned.
-    fn next(self: &Self) -> ?u8 {
+    fn nextByte(self: &Self) -> ?u8 {
         if (self.c_byte >= self.c_buf.len) {
             null
         } else {
@@ -361,12 +390,6 @@ pub const Tokenizer = struct {
     fn setEndToken(self: &Self, id: TokenId) -> %void {
         self.setToken(id);
         %return self.endToken();
-    }
-
-    /// Construct a single byte token and push onto the token list.
-    fn singleToken(self: &Self, id: TokenId) -> %void {
-        self.beginToken();
-        %return self.setEndToken(id);
     }
 
     /// Peek at the character n steps ahead in the stream.
@@ -589,11 +612,13 @@ pub const Tokenizer = struct {
     }
 
     /// Process a line comment, returning the encountered characters
+    // TODO: For comments, do we want to strip leading whitespace here (and trailing)?
+    // Any reason to preserve at till later?
     fn consumeUntilNewline(self: &Self) -> %ArrayList(u8) {
         var comment = ArrayList(u8).init(&debug.global_allocator);
         %defer comment.deinit();
 
-        while (self.next()) |c| {
+        while (self.nextByte()) |c| {
             switch (c) {
                 '\n' => {
                     break;
@@ -608,35 +633,30 @@ pub const Tokenizer = struct {
         comment
     }
 
-    /// Construct a new tokenization instance and return it in its completed state.
-    ///
-    // NOTE: If we want to return a stream of tokens, tie this to an underlying tokenization state
-    // which handles the intern pool.
-    pub fn process(buf: []const u8) -> %Self {
-        var t = Self.init(buf);
-        %defer t.deinit();
+    /// Return the next token from the buffer.
+    pub fn next(t: &Self) -> %&const Token {
+        if (t.consumed) {
+            return error.Consumed;
+        }
 
-        // TODO: Offset is one too great. Should be a peek here or at least perform
-        // a beginToken before we get the token or offset it by 1.
-        while (t.next()) |ch| {
+        t.beginToken();
+        if (t.nextByte()) |ch| {
             switch (ch) {
                 ' ', '\r', '\n', '\t' => {},
 
-                '(' => %return t.singleToken(TokenId.LParen),
-                ')' => %return t.singleToken(TokenId.RParen),
-                ',' => %return t.singleToken(TokenId.Comma),
-                '{' => %return t.singleToken(TokenId.LBrace),
-                '}' => %return t.singleToken(TokenId.RBrace),
-                '[' => %return t.singleToken(TokenId.LBracket),
-                ']' => %return t.singleToken(TokenId.RBracket),
-                ';' => %return t.singleToken(TokenId.Semicolon),
-                ':' => %return t.singleToken(TokenId.Colon),
-                '#' => %return t.singleToken(TokenId.NumberSign),
-                '~' => %return t.singleToken(TokenId.Tilde),
+                '(' => %return t.setEndToken(TokenId.LParen),
+                ')' => %return t.setEndToken(TokenId.RParen),
+                ',' => %return t.setEndToken(TokenId.Comma),
+                '{' => %return t.setEndToken(TokenId.LBrace),
+                '}' => %return t.setEndToken(TokenId.RBrace),
+                '[' => %return t.setEndToken(TokenId.LBracket),
+                ']' => %return t.setEndToken(TokenId.RBracket),
+                ';' => %return t.setEndToken(TokenId.Semicolon),
+                ':' => %return t.setEndToken(TokenId.Colon),
+                '#' => %return t.setEndToken(TokenId.NumberSign),
+                '~' => %return t.setEndToken(TokenId.Tilde),
 
                 '_', 'a' ... 'z', 'A' ... 'Z' => {
-                    t.beginToken();
-
                     var symbol = ArrayList(u8).init(&debug.global_allocator);
                     %return symbol.append(ch);
 
@@ -663,8 +683,6 @@ pub const Tokenizer = struct {
                 },
 
                 '0' => {
-                    t.beginToken();
-
                     const value = switch (t.peek(0)) {
                         'b' => {
                             t.bump(1);
@@ -692,21 +710,18 @@ pub const Tokenizer = struct {
                 },
 
                 '1' ... '9' => {
-                    t.beginToken();
                     const value = %return t.consumeNumber(10, ch);
                     (??t.c_token).data = TokenData.Integer { value };
                     %return t.setEndToken(TokenId.IntLiteral);
                 },
 
                 '"' => {
-                    t.beginToken();
                     var literal = %return t.consumeString();
                     %return t.setInternToken(&literal);
                     %return t.setEndToken(TokenId.StringLiteral);
                 },
 
                 '-' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '>' => {
                             t.bump(1);
@@ -739,7 +754,6 @@ pub const Tokenizer = struct {
                 },
 
                 '+' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -772,7 +786,6 @@ pub const Tokenizer = struct {
                 },
 
                 '*' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -805,7 +818,6 @@ pub const Tokenizer = struct {
                 },
 
                 '/' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '/' => {
                             t.bump(1);
@@ -842,7 +854,6 @@ pub const Tokenizer = struct {
                 },
 
                 '%' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -866,10 +877,8 @@ pub const Tokenizer = struct {
                 },
 
                 '@' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '"' => {
-                            t.beginToken();
                             t.bump(1);
                             var literal = %return t.consumeString();
                             %return t.setInternToken(&literal);
@@ -883,7 +892,6 @@ pub const Tokenizer = struct {
                 },
 
                 '&' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -897,7 +905,6 @@ pub const Tokenizer = struct {
                 },
 
                 '^' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -911,7 +918,6 @@ pub const Tokenizer = struct {
                 },
 
                 '|' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -925,7 +931,6 @@ pub const Tokenizer = struct {
                 },
 
                 '=' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -944,7 +949,6 @@ pub const Tokenizer = struct {
                 },
 
                 '!' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -958,7 +962,6 @@ pub const Tokenizer = struct {
                 },
 
                 '<' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -986,7 +989,6 @@ pub const Tokenizer = struct {
                 },
 
                 '>' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '=' => {
                             t.bump(1);
@@ -1014,7 +1016,6 @@ pub const Tokenizer = struct {
                 },
 
                 '.' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '.' => {
                             t.bump(1);
@@ -1037,7 +1038,6 @@ pub const Tokenizer = struct {
                 },
 
                 '?' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '?' => {
                             t.bump(1);
@@ -1056,7 +1056,6 @@ pub const Tokenizer = struct {
                 },
 
                 '\'' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '\'' => {
                             return error.MissingCharLiteralData;
@@ -1090,7 +1089,6 @@ pub const Tokenizer = struct {
                 },
 
                 '\\' => {
-                    t.beginToken();
                     switch (t.peek(0)) {
                         '\\' => {
                             t.bump(1);
@@ -1108,6 +1106,32 @@ pub const Tokenizer = struct {
                 else => {
                     return error.InvalidCharacter;
                 }
+            }
+        } else {
+            t.consumed = true;
+            %return t.setEndToken(TokenId.Eof);
+        }
+
+        &t.tokens.toSliceConst()[t.tokens.len - 1]
+    }
+
+    /// Construct a new tokenization instance and return it in its completed state.
+    ///
+    // NOTE: If we want to return a stream of tokens, tie this to an underlying tokenization state
+    // which handles the intern pool.
+    //
+    // NOTE: The tokenizer will continue through errors until the complete buffer has been processed.
+    // The list of errors encountered will be stored in the `errors` field.
+    pub fn process(buf: []const u8) -> %Self {
+        var t = Self.init(buf);
+        %defer t.deinit();
+
+        // This iterates over the entire buffer. Tokens are returned as references but are still
+        // stored in the `tokens` field.
+        while (true) {
+            if (t.next()) |_| {} else |err| switch (err) {
+                error.Consumed => break,
+                else => return err,
             }
         }
 
