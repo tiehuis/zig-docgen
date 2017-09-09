@@ -5,28 +5,70 @@ const debug = std.debug;
 const Buffer = std.Buffer;
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
 
+const Action = enum {
+    Tokenize,
+    Parse,
+    None,
+};
+
+fn printUsage() {
+    %%io.stderr.printf(
+        \\usage: cat <file> | docgen
+        \\
+        \\  --tokenize  Tokenize the input file and print the tokens
+        \\  --parse     Parse the input file and print the ast
+        \\
+    );
+}
+
+fn commandTokenize(buf: &Buffer) {
+    var t = %%Tokenizer.process(buf.toSliceConst());
+    for (t.tokens.toSliceConst()) |token| {
+        %%token.print();
+    }
+}
+
+fn commandParse(buf: &Buffer) {
+    @panic("TODO implement command parse");
+}
+
 pub fn main() -> %void {
-    var is = if (os.args.count() >= 2) {
-        // TODO: BadFd issue here. Just cat file for testing.
-        var fd = io.InStream.open(os.args.at(1), &debug.global_allocator) %% |err| {
-            %%io.stderr.printf("unable to open file: {}\n", @errorName(err));
-            os.abort();
-        };
-        defer fd.close();
-        fd
-    } else {
-        io.stdin
-    };
+    var action = Action.None;
+
+    { var i: usize = 1; while (i < os.args.count()) : (i += 1) {
+        const arg = os.args.at(i);
+
+        if (std.mem.eql(u8, arg, "--tokenize")) {
+            action = Action.Tokenize;
+        } else if (std.mem.eql(u8, arg, "--parse")) {
+            action = Action.Parse;
+        } else if (std.mem.eql(u8, arg, "--help")) {
+            printUsage();
+            os.exit(0);
+        } else {
+            %%io.stderr.printf("unknown argument: {}\n", arg);
+            printUsage();
+            os.exit(1);
+        }
+    }}
+
+    // TODO: Allow reading from a file and not just stdin
+    var is = io.stdin;
 
     var buf = Buffer.initNull(&debug.global_allocator);
     defer buf.deinit();
     is.readAll(&buf) %% |err| {
-        %%io.stderr.printf("unable to read file: {}\n", @errorName(err));
+        %%io.stderr.printf("unable to read input stream: {}\n", @errorName(err));
         os.abort();
     };
 
-    var t = %%Tokenizer.process(buf.toSliceConst());
-    for (t.tokens.toSliceConst()) |token| {
-        %%token.print();
+    switch (action) {
+        Action.Tokenize => commandTokenize(&buf),
+        Action.Parse => commandParse(&buf),
+
+        Action.None => {
+            printUsage();
+            os.exit(1);
+        }
     }
 }
