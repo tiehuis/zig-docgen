@@ -1,5 +1,9 @@
 A document generator for zig.
 
+```
+cat examples/top_level.zig | ./docgen
+```
+
 For now, the idea is to perform lexing and some simplistic parsing of the
 top-level structure, returning useful definitions in an intermediate format
 (.e.g JSON).

@@ -2,9 +2,9 @@ const Builder = @import("std").build.Builder;
 
 pub fn build(b: &Builder) {
     const mode = b.standardReleaseOptions();
-    const exe = b.addExecutable("tokenizer", "src/tokenizer.zig");
+    const exe = b.addExecutable("docgen", "src/main.zig");
     exe.setBuildMode(mode);
-    exe.setOutputPath("./tokenizer");
+    exe.setOutputPath("./docgen");
 
     b.default_step.dependOn(&exe.step);
     b.installArtifact(exe);

@@ -209,14 +209,14 @@ fn getDigitValueForRadix(comptime radix: u8, c: u8) -> %u8 {
 }
 
 /// Extra data associated with a particular token.
-const TokenData = enum {
+pub const TokenData = enum {
     InternPoolRef: []const u8,
     Integer: u128,
     Char: u8,
 };
 
 /// A Token consists of a type/id and an associated location/span within the source file.
-const Token = struct {
+pub const Token = struct {
     id: TokenId,
     span: Span,
     data: ?TokenData,
@@ -245,7 +245,7 @@ const Token = struct {
 };
 
 /// A Span represents a contiguous sequence (byte-wise) of a source file.
-const Span = struct {
+pub const Span = struct {
     start_byte: usize,
     end_byte: usize,
     start_line: usize,
@@ -264,9 +264,9 @@ fn u8eql(a: []const u8, b: []const u8) -> bool {
 }
 
 // The second value is heap allocated.
-const InternPool = HashMap([]const u8, []const u8, std.mem.hash_slice_u8, u8eql);
+pub const InternPool = HashMap([]const u8, []const u8, std.mem.hash_slice_u8, u8eql);
 
-const Tokenizer = struct {
+pub const Tokenizer = struct {
     const Self = this;
 
     tokens: ArrayList(Token),
@@ -1114,33 +1114,3 @@ const Tokenizer = struct {
         t
     }
 };
-
-const os = std.os;
-const io = std.io;
-const Buffer = std.Buffer;
-
-pub fn main() -> %void {
-    var is = if (os.args.count() >= 2) {
-        // TODO: BadFd issue here. Just cat file for testing.
-        var fd = io.InStream.open(os.args.at(1), &debug.global_allocator) %% |err| {
-            %%io.stderr.printf("unable to open file: {}\n", @errorName(err));
-            os.abort();
-        };
-        defer fd.close();
-        fd
-    } else {
-        io.stdin
-    };
-
-    var buf = Buffer.initNull(&debug.global_allocator);
-    defer buf.deinit();
-    is.readAll(&buf) %% |err| {
-        %%io.stderr.printf("unable to read file: {}\n", @errorName(err));
-        os.abort();
-    };
-
-    var t = %%Tokenizer.process(buf.toSliceConst());
-    for (t.tokens.toSliceConst()) |token| {
-        %%token.print();
-    }
-}
