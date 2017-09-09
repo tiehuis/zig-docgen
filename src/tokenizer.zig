@@ -8,13 +8,10 @@
 const std = @import("std");
 const debug = std.debug;
 const ArrayList = std.ArrayList;
+const HashMap = std.HashMap;
 
 /// A TokenId represents a kind of token. It will also hold its associated data if present.
 const TokenId = enum {
-    Comment,            // `//`  case
-    DocComment,         // `///` case
-    ModuleDocComment,   // `//!` case
-
     Ampersand,
     Arrow,
     AtSign,
@@ -36,9 +33,11 @@ const TokenId = enum {
     CmpLessThan,
     CmpNotEq,
     Colon,
+    Comment,
     Comma,
     Dash,
     DivEq,
+    DocComment,
     Dot,
     DoubleQuestion,
     Ellipsis2,
@@ -98,6 +97,7 @@ const TokenId = enum {
     MinusPercentEq,
     MultiLineStringLiteral,
     ModEq,
+    ModuleDocComment,
     NumberSign,
     Percent,
     PercentDot,
@@ -208,11 +208,40 @@ fn getDigitValueForRadix(comptime radix: u8, c: u8) -> %u8 {
     }
 }
 
+/// Extra data associated with a particular token.
+const TokenData = enum {
+    InternPoolRef: []const u8,
+    Integer: u128,
+    Char: u8,
+};
+
 /// A Token consists of a type/id and an associated location/span within the source file.
 const Token = struct {
     id: TokenId,
     span: Span,
-    // TODO: Add an extra data field which has specific data used for some instances.
+    data: ?TokenData,
+
+    pub fn print(self: &const Token) -> %void {
+        const printf = std.io.stdout.printf;
+
+        %return printf("{}:{} {}",
+            self.span.start_line,
+            self.span.start_column,
+            @enumTagName(self.id)
+        );
+
+        if (self.data) |inner| {
+            %return printf(" (");
+            switch (inner) {
+                TokenData.InternPoolRef => |p_ref| %return printf("{}", p_ref),
+                TokenData.Integer       => |i| %return printf("{}", i),
+                TokenData.Char          => |c| %return printf("{c}", c),
+            }
+            %return printf(")");
+        }
+
+        %return printf("\n");
+    }
 };
 
 /// A Span represents a contiguous sequence (byte-wise) of a source file.
@@ -230,11 +259,19 @@ error InvalidCharacterAfterBackslash;
 error MissingCharLiteralData;
 error ExtraCharLiteralData;
 
+fn u8eql(a: []const u8, b: []const u8) -> bool {
+    std.mem.eql(u8, a, b)
+}
+
+// The second value is heap allocated.
+const InternPool = HashMap([]const u8, []const u8, std.mem.hash_slice_u8, u8eql);
+
 const Tokenizer = struct {
     const Self = this;
 
     tokens: ArrayList(Token),
     lines: ArrayList(usize),
+    intern_pool: InternPool,
 
     c_token: ?Token,
     c_byte: usize,
@@ -247,6 +284,7 @@ const Tokenizer = struct {
         Self {
             .tokens = ArrayList(Token).init(&debug.global_allocator),
             .lines = ArrayList(usize).init(&debug.global_allocator),
+            .intern_pool = InternPool.init(&debug.global_allocator),
 
             .c_token = null,
             .c_byte = 0,
@@ -285,6 +323,7 @@ const Tokenizer = struct {
                 .start_line = self.c_line,
                 .start_column = self.c_column,
             },
+            .data = null,
         };
     }
 
@@ -301,6 +340,21 @@ const Tokenizer = struct {
         c.span.end_byte = self.c_byte + 1;
         %return self.tokens.append(c);
         self.c_token = null;
+    }
+
+    /// Set the data field for a ArrayList(u8) field using the internal InternPool.
+    ///
+    /// This takes ownership of the underlying memory.
+    fn setInternToken(self: &Self, data: &ArrayList(u8)) -> %void {
+        const ref = if (self.intern_pool.get(data.toSliceConst())) |entry| {
+            data.deinit();
+            entry.value
+        } else {
+            _ = %return self.intern_pool.put(data.toSliceConst(), data.toSliceConst());
+            data.toSliceConst()
+        };
+
+        (??self.c_token).data = TokenData.InternPoolRef { ref };
     }
 
     /// Mark the current position as the end of a token and set it to a new id.
@@ -357,7 +411,7 @@ const Tokenizer = struct {
     //
     // TODO: Use big integer generally improve here.
     // TODO: Handle float seperately.
-    fn processNumber(self: &Self, comptime radix: u8, init_value: ?u8) -> %u128 {
+    fn consumeNumber(self: &Self, comptime radix: u8, init_value: ?u8) -> %u128 {
         var number: u128 = if (init_value) |v| {
             %return getDigitValueForRadix(radix, v)
         } else {
@@ -380,7 +434,6 @@ const Tokenizer = struct {
             }
         }
 
-        %return self.setEndToken(TokenId.IntLiteral);
         number
     }
 
@@ -389,11 +442,13 @@ const Tokenizer = struct {
     /// Returns the utf8 encoded value of the codepoint.
     ///
     /// This will only modify the current stream position.
-    fn processCharCode(self: &Self,
-        comptime radix: u8, comptime count: u8, comptime is_unicode: bool) -> %u32
+    fn consumeCharCode(self: &Self,
+        comptime radix: u8, comptime count: u8, comptime is_unicode: bool) -> %ArrayList(u8)
     {
-        var char_code: u32 = 0;
+        var utf8_code = ArrayList(u8).init(&debug.global_allocator);
+        %defer utf8_code.deinit();
 
+        var char_code: u32 = 0;
         comptime var i: usize = 0;
         inline while (i < count) : (i += 1) {
             char_code *= radix;
@@ -401,35 +456,29 @@ const Tokenizer = struct {
             self.bump(1);
         }
 
-        // TODO: Do we really want to return these values or deal with them here?
         if (is_unicode) {
             if (char_code <= 0x7f) {
-                // push(char_code)
-            } else if ((??self.c_token).id == TokenId.CharLiteral) {
-                // TODO: Handle this at the caller side.
-                // !cannot push multi-byte unicode literal
+                %return utf8_code.append(u8(char_code));
             } else if (char_code <= 0x7ff) {
-                // push(0xc0 | (char_code >> 6))
-                // push(0x80 | (char_code & 0x3f))
+                %return utf8_code.append(0xc0 | u8(char_code >> 6));
+                %return utf8_code.append(0x80 | u8(char_code & 0x3f));
             } else if (char_code <= 0xffff) {
-                // push(0xe0 | (char_code >> 12))
-                // push(0x80 | ((char_code >> 6) & 0x3f))
-                // push(0x80 | (char_code & 0x3f))
+                %return utf8_code.append(0xe0 | u8(char_code >> 12));
+                %return utf8_code.append(0x80 | u8((char_code >> 6) & 0x3f));
+                %return utf8_code.append(0x80 | u8(char_code & 0x3f));
             } else if (char_code <= 0x10ffff) {
-                // push(0xf0 | (char_code >> 18))
-                // push(0x80 | ((char_code >> 12) & 0x3f))
-                // push(0x80 | ((char_code >> 6) & 0x3f)
-                // push(0x80 | (char_code & 0x3f))
+                %return utf8_code.append(0xf0 | u8(char_code >> 18));
+                %return utf8_code.append(0x80 | u8((char_code >> 12) & 0x3f));
+                %return utf8_code.append(0x80 | u8((char_code >> 6) & 0x3f));
+                %return utf8_code.append(0x80 | u8(char_code & 0x3f));
             } else {
-                // !value out of range
                 return error.UnicodeCharCodeOutOfRange;
             }
         } else {
-            // push(char_code)
+            %return utf8_code.append(u8(char_code));
         }
 
-        // TODO: Construct and push right code
-        u32(0)
+        utf8_code
     }
 
     /// Process an escape code.
@@ -437,29 +486,64 @@ const Tokenizer = struct {
     /// Expects the '/' has already been handled by the caller.
     ///
     /// Returns the utf8 encoded value of the codepoint.
-    fn processStringEscape(self: &Self) -> %u32 {
+    fn consumeStringEscape(self: &Self) -> %ArrayList(u8) {
         switch (self.peek(0)) {
             'x' => {
                 self.bump(1);
-                self.processCharCode(16, 2, false)
+                self.consumeCharCode(16, 2, false)
             },
 
             'u' => {
                 self.bump(1);
-                self.processCharCode(16, 4, true)
+                self.consumeCharCode(16, 4, true)
             },
 
             'U' => {
                 self.bump(1);
-                self.processCharCode(16, 6, true)
+                self.consumeCharCode(16, 6, true)
             },
 
-            'n'  => { self.bump(1); u32('\n') },
-            'r'  => { self.bump(1); u32('\r') },
-            '\\' => { self.bump(1); u32('\\') },
-            't'  => { self.bump(1); u32('\t') },
-            '\'' => { self.bump(1); u32('\'') },
-            '"'  => { self.bump(1); u32('\"') },
+            'n'  => {
+                self.bump(1);
+                var l = ArrayList(u8).init(&debug.global_allocator);
+                %return l.append('\n');
+                l
+            },
+
+            'r'  => {
+                self.bump(1);
+                var l = ArrayList(u8).init(&debug.global_allocator);
+                %return l.append('\r');
+                l
+            },
+
+            '\\' => {
+                self.bump(1);
+                var l = ArrayList(u8).init(&debug.global_allocator);
+                %return l.append('\\');
+                l
+            },
+
+            't'  => {
+                self.bump(1);
+                var l = ArrayList(u8).init(&debug.global_allocator);
+                %return l.append('\t');
+                l
+            },
+
+            '\'' => {
+                self.bump(1);
+                var l = ArrayList(u8).init(&debug.global_allocator);
+                %return l.append('\'');
+                l
+            },
+
+            '"'  => {
+                self.bump(1);
+                var l = ArrayList(u8).init(&debug.global_allocator);
+                %return l.append('\"');
+                l
+            },
 
             else => {
                 @panic("unexpected character");
@@ -468,7 +552,7 @@ const Tokenizer = struct {
     }
 
     /// Process a string, returning the encountered characters.
-    fn processString(self: &Self) -> %ArrayList(u8) {
+    fn consumeString(self: &Self) -> %ArrayList(u8) {
         var literal = ArrayList(u8).init(&debug.global_allocator);
         %defer literal.deinit();
 
@@ -485,8 +569,9 @@ const Tokenizer = struct {
 
                 '\\' => {
                     self.bump(1);
-                    const value = %return self.processStringEscape();
-                    // push(value)
+                    var value = %return self.consumeStringEscape();
+                    %return literal.appendSlice(value.toSliceConst());
+                    value.deinit();
                 },
 
                 0 => {
@@ -503,11 +588,30 @@ const Tokenizer = struct {
         literal
     }
 
+    /// Process a line comment, returning the encountered characters
+    fn consumeUntilNewline(self: &Self) -> %ArrayList(u8) {
+        var comment = ArrayList(u8).init(&debug.global_allocator);
+        %defer comment.deinit();
+
+        while (self.next()) |c| {
+            switch (c) {
+                '\n' => {
+                    break;
+                },
+
+                else => {
+                    %return comment.append(c);
+                }
+            }
+        }
+
+        comment
+    }
+
     /// Construct a new tokenization instance and return it in its completed state.
     ///
-    // Adapt in the future to return a stream of tokens?
-    // TODO: How would this handle the line offsets though? Could return an enum of a line offset
-    // or a token, or just keep new lines as tokens themselves?
+    // NOTE: If we want to return a stream of tokens, tie this to an underlying tokenization state
+    // which handles the intern pool.
     pub fn process(buf: []const u8) -> %Self {
         var t = Self.init(buf);
         %defer t.deinit();
@@ -550,8 +654,10 @@ const Tokenizer = struct {
                     }
 
                     if (getKeywordId(symbol.toSliceConst())) |id| {
+                        symbol.deinit();
                         %return t.setEndToken(id);
                     } else {
+                        %return t.setInternToken(&symbol);
                         %return t.setEndToken(TokenId.Symbol);
                     }
                 },
@@ -562,38 +668,40 @@ const Tokenizer = struct {
                     const value = switch (t.peek(0)) {
                         'b' => {
                             t.bump(1);
-                            %return t.processNumber(2, null)
+                            %return t.consumeNumber(2, null)
                         },
 
                         'o' => {
                             t.bump(1);
-                            %return t.processNumber(8, null)
+                            %return t.consumeNumber(8, null)
                         },
 
                         'x' => {
                             t.bump(1);
-                            %return t.processNumber(16, null)
+                            %return t.consumeNumber(16, null)
                         },
 
                         else => {
                             // TODO: disallow anything after a 0 except a dot.
-                            %return t.processNumber(10, null)
+                            %return t.consumeNumber(10, null)
                         },
                     };
 
-                    // push(number)
+                    (??t.c_token).data = TokenData.Integer { value };
+                    %return t.setEndToken(TokenId.IntLiteral);
                 },
 
                 '1' ... '9' => {
                     t.beginToken();
-                    const value = %return t.processNumber(10, ch);
-                    // push(number)
+                    const value = %return t.consumeNumber(10, ch);
+                    (??t.c_token).data = TokenData.Integer { value };
+                    %return t.setEndToken(TokenId.IntLiteral);
                 },
 
                 '"' => {
                     t.beginToken();
-                    const literal = %return t.processString();
-                    // push(literal)
+                    var literal = %return t.consumeString();
+                    %return t.setInternToken(&literal);
                     %return t.setEndToken(TokenId.StringLiteral);
                 },
 
@@ -701,20 +809,25 @@ const Tokenizer = struct {
                     switch (t.peek(0)) {
                         '/' => {
                             t.bump(1);
+                            switch (t.peek(0)) {
+                                '!' => {
+                                    t.bump(1);
+                                    t.setToken(TokenId.ModuleDocComment);
+                                },
 
-                            const comment_id = switch (t.peek(0)) {
-                                '!' => TokenId.ModuleDocComment,
-                                '/' => TokenId.DocComment,
-                                else => TokenId.Comment,
-                            };
+                                '/' => {
+                                    t.bump(1);
+                                    t.setToken(TokenId.DocComment);
+                                },
 
-                            while (t.next()) |c| {
-                                if (c == '\n') {
-                                    break;
-                                }
+                                else => {
+                                    t.setToken(TokenId.Comment);
+                                },
                             }
 
-                            %return t.setEndToken(comment_id);
+                            var comment_inner = %return t.consumeUntilNewline();
+                            %return t.setInternToken(&comment_inner);
+                            %return t.endToken();
                         },
 
                         '=' => {
@@ -758,8 +871,8 @@ const Tokenizer = struct {
                         '"' => {
                             t.beginToken();
                             t.bump(1);
-                            const literal = %return t.processString();
-                            // push(literal)
+                            var literal = %return t.consumeString();
+                            %return t.setInternToken(&literal);
                             %return t.setEndToken(TokenId.Symbol);
                         },
 
@@ -951,13 +1064,15 @@ const Tokenizer = struct {
 
                         '\\' => {
                             t.bump(1);
-                            const value = %return t.processStringEscape();
-                            // push(value)
+                            var value = %return t.consumeStringEscape();
 
                             if (t.peek(0) != '\'') {
                                 return error.ExtraCharLiteralData;
                             } else {
                                 t.bump(1);
+                                std.debug.assert(value.len == 1);
+                                (??t.c_token).data = TokenData.Char { value.toSliceConst()[0] };
+                                value.deinit();
                                 %return t.setEndToken(TokenId.CharLiteral);
                             }
                         },
@@ -966,6 +1081,7 @@ const Tokenizer = struct {
                             if (t.peek(1) != '\'') {
                                 return error.ExtraCharLiteralData;
                             } else {
+                                (??t.c_token).data = TokenData.Char { t.peek(0) };
                                 t.bump(2);
                                 %return t.setEndToken(TokenId.CharLiteral);
                             }
@@ -978,15 +1094,8 @@ const Tokenizer = struct {
                     switch (t.peek(0)) {
                         '\\' => {
                             t.bump(1);
-
-                            while (t.next()) |c| {
-                                if (c == '\n') {
-                                    break;
-                                } else {
-                                    // push(c)
-                                }
-                            }
-
+                            var literal = %return t.consumeUntilNewline();
+                            %return t.setInternToken(&literal);
                             %return t.setEndToken(TokenId.MultiLineStringLiteral);
                         },
 
@@ -1031,10 +1140,7 @@ pub fn main() -> %void {
     };
 
     var t = %%Tokenizer.process(buf.toSliceConst());
-    for (t.tokens.toSliceConst()) |x| {
-        %%std.io.stdout.printf(
-            "{}:{} - {}\n",
-            x.span.start_line, x.span.start_column, @enumTagName(x.id),
-        );
+    for (t.tokens.toSliceConst()) |token| {
+        %%token.print();
     }
 }
