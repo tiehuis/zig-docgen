@@ -4,6 +4,7 @@ const io = std.io;
 const debug = std.debug;
 const Buffer = std.Buffer;
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
+const c_alloc = @import("c_allocator.zig");
 
 const Action = enum {
     Tokenize,
@@ -22,8 +23,10 @@ fn printUsage() {
 }
 
 fn commandTokenize(buf: &Buffer) {
-    var t = %%Tokenizer.process(buf.toSliceConst());
-    for (t.tokens.toSliceConst()) |token| {
+    var tkr = Tokenizer.init(&c_alloc.c_allocator);
+
+    _ = %%tkr.process(buf.toSliceConst());
+    for (tkr.tokens.toSliceConst()) |token| {
         %%token.print();
     }
 }

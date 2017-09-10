@@ -4,10 +4,13 @@
 //! overall structure is quite different and should be a bit easier to follow.
 //!
 //! This also keeps track of comment information as tokens for documentation generation.
+// TODO: Track sufficient indentation information in blocks. If the token is the first in a line,
+// mark it with an integer specifying how many tabs/spaces preceed it.
 
 const std = @import("std");
 const debug = std.debug;
 const ArrayList = std.ArrayList;
+const Allocator = std.mem.Allocator;
 const HashMap = std.HashMap;
 
 /// A TokenId represents a kind of token. It will also hold its associated data if present.
@@ -308,6 +311,7 @@ pub const Tokenizer = struct {
     intern_pool: InternPool,
     errors: ArrayList(Token),
     consumed: bool,
+    allocator: &Allocator,
 
     c_token: ?Token,
     c_byte: usize,
@@ -316,26 +320,29 @@ pub const Tokenizer = struct {
     c_buf: []const u8,
 
     /// Initialize a new tokenizer to handle the specified input buffer.
-    fn init(buf: []const u8) -> Self {
+    pub fn init(allocator: &Allocator) -> Self {
         Self {
-            .tokens = ArrayList(Token).init(&debug.global_allocator),
-            .lines = ArrayList(usize).init(&debug.global_allocator),
-            .intern_pool = InternPool.init(&debug.global_allocator),
-            .errors = ArrayList(Token).init(&debug.global_allocator),
+            .tokens = ArrayList(Token).init(allocator),
+            .lines = ArrayList(usize).init(allocator),
+            .intern_pool = InternPool.init(allocator),
+            .errors = ArrayList(Token).init(allocator),
             .consumed = false,
+            .allocator = allocator,
 
             .c_token = null,
             .c_byte = 0,
             .c_line = 1,
             .c_column = 1,
-            .c_buf = buf,
+            .c_buf = undefined,
         }
     }
 
     /// Deinitialize the internal tokenizer state.
-    fn deinit(self: &Self) {
+    pub fn deinit(self: &Self) {
         self.tokens.deinit();
         self.lines.deinit();
+        self.intern_pool.deinit();
+        self.errors.deinit();
     }
 
     /// Returns the next byte in the buffer and advances our position.
@@ -505,7 +512,7 @@ pub const Tokenizer = struct {
     fn consumeCharCode(self: &Self,
         comptime radix: u8, comptime count: u8, comptime is_unicode: bool) -> %ArrayList(u8)
     {
-        var utf8_code = ArrayList(u8).init(&debug.global_allocator);
+        var utf8_code = ArrayList(u8).init(self.allocator);
         %defer utf8_code.deinit();
 
         var char_code: u32 = 0;
@@ -565,42 +572,42 @@ pub const Tokenizer = struct {
 
             'n'  => {
                 self.bump(1);
-                var l = ArrayList(u8).init(&debug.global_allocator);
+                var l = ArrayList(u8).init(self.allocator);
                 %return l.append('\n');
                 l
             },
 
             'r'  => {
                 self.bump(1);
-                var l = ArrayList(u8).init(&debug.global_allocator);
+                var l = ArrayList(u8).init(self.allocator);
                 %return l.append('\r');
                 l
             },
 
             '\\' => {
                 self.bump(1);
-                var l = ArrayList(u8).init(&debug.global_allocator);
+                var l = ArrayList(u8).init(self.allocator);
                 %return l.append('\\');
                 l
             },
 
             't'  => {
                 self.bump(1);
-                var l = ArrayList(u8).init(&debug.global_allocator);
+                var l = ArrayList(u8).init(self.allocator);
                 %return l.append('\t');
                 l
             },
 
             '\'' => {
                 self.bump(1);
-                var l = ArrayList(u8).init(&debug.global_allocator);
+                var l = ArrayList(u8).init(self.allocator);
                 %return l.append('\'');
                 l
             },
 
             '"'  => {
                 self.bump(1);
-                var l = ArrayList(u8).init(&debug.global_allocator);
+                var l = ArrayList(u8).init(self.allocator);
                 %return l.append('\"');
                 l
             },
@@ -613,7 +620,7 @@ pub const Tokenizer = struct {
 
     /// Process a string, returning the encountered characters.
     fn consumeString(self: &Self) -> %ArrayList(u8) {
-        var literal = ArrayList(u8).init(&debug.global_allocator);
+        var literal = ArrayList(u8).init(self.allocator);
         %defer literal.deinit();
 
         while (true) {
@@ -652,7 +659,7 @@ pub const Tokenizer = struct {
     // NOTE: We do not want to strip whitespace from comments since things like diagrams may require
     // it to be formatted correctly. We could do trailing but don't bother right now.
     fn consumeUntilNewline(self: &Self) -> %ArrayList(u8) {
-        var comment = ArrayList(u8).init(&debug.global_allocator);
+        var comment = ArrayList(u8).init(self.allocator);
         %defer comment.deinit();
 
         while (self.nextByte()) |c| {
@@ -694,7 +701,7 @@ pub const Tokenizer = struct {
                 '~' => %return t.setEndToken(TokenId.Tilde),
 
                 '_', 'a' ... 'z', 'A' ... 'Z' => {
-                    var symbol = ArrayList(u8).init(&debug.global_allocator);
+                    var symbol = ArrayList(u8).init(t.allocator);
                     %return symbol.append(ch);
 
                     while (true) {
@@ -1179,14 +1186,13 @@ pub const Tokenizer = struct {
     //
     // NOTE: The tokenizer will continue through errors until the complete buffer has been processed.
     // The list of errors encountered will be stored in the `errors` field.
-    pub fn process(buf: []const u8) -> %Self {
-        var t = Self.init(buf);
-        %defer t.deinit();
+    pub fn process(self: &Self, buf: []const u8) -> %void {
+        self.c_buf = buf;
 
         // This iterates over the entire buffer. Tokens are returned as references but are still
         // stored in the `tokens` field.
         while (true) {
-            if (t.next()) |ch| {
+            if (self.next()) |ch| {
                 if (ch == null) {
                     break;
                 }
@@ -1194,7 +1200,5 @@ pub const Tokenizer = struct {
                 else => return err,
             }
         }
-
-        t
     }
 };
