@@ -33,3 +33,6 @@ const a =
 @import("std").io.stdout.printf("{}\t{}\r{}\t{}\n" "{}\\t{}\\r{}\\t{}\\n", a, b, c, d);
 
 1.012307124 -123 -1.1
+
+// NOTE: 1.1e8 supposedly 1.1e11? check if print issue or parse issue
+1.1e8 2.1e+12 4213091.7e-2

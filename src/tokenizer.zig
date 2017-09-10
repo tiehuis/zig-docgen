@@ -266,7 +266,7 @@ pub const Token = struct {
                 TokenData.Float => |f| {
                     // Temporarily don't print floating points to work around issue #375.
                     %return printf("float");
-                    // %return printf("{}", f);
+                    //%return printf("{}", f);
                 },
                 TokenData.Char => |c| {
                     %return printCharEscaped(c);
@@ -444,27 +444,72 @@ pub const Tokenizer = struct {
 
     // Actual processing helper routines.
 
+    /// Consume an entire integer of the specified radix.
+    fn consumeInteger(self: &Self, comptime radix: u8, init_value: u64) -> %u64 {
+        var number = init_value;
+
+        while (true) {
+            const ch = self.peek(0);
+
+            // A bad value does not mean we should fail tokenization here.
+            const value = if (getDigitValueForRadix(radix, ch)) |ok| {
+                self.bump(1);
+                number *= radix;
+                number += ok;
+            } else |_| {
+                return number;
+            };
+        }
+    }
+
     /// Process a float with the specified radix starting from the decimal part.
     ///
     /// The non-decimal portion should have been processed by `consumeNumber`.
-    fn consumeFloat(self: &Self, comptime radix: u8, whole_part: u64) -> %f64 {
-        // TODO: Handle hex float syntax and e syntax
-        var number: u64 = 0;
-        var digits_count: usize = 1;
+    fn consumeFloatFractional(self: &Self, comptime radix: u8, whole_part: u64) -> %f64 {
+        debug.assert(radix == 10 or radix == 16);
 
-        while (true) {
-            switch (self.peek(0)) {
-                '0' ... '9', 'a' ... 'f', 'A' ... 'F' => |c| {
-                    self.bump(1);
-                    number *= radix;
-                    number += %return getDigitValueForRadix(radix, c);
-                },
+        // TODO: Handle hex float syntax
+        var number = %return self.consumeInteger(radix, 0);
 
-                else => {
-                    const frac_part = f64(number) / (std.math.pow(f64, f64(10), f64(1 + std.math.log10(number))));
-                    return f64(whole_part) + frac_part;
-                },
-            }
+        switch (self.peek(0)) {
+            'e', 'E' => {
+                self.bump(1);
+
+                const is_neg_exp = switch (self.peek(0)) {
+                    '-' => {
+                        self.bump(1);
+                        true
+                    },
+                    '+' => {
+                        self.bump(1);
+                        false
+                    },
+                    else => {
+                        false
+                    },
+                };
+
+                var exp = %return self.consumeInteger(radix, 0);
+
+                // TODO: Deduplicate + add integer pow function variant to avoid cast.
+                const frac_part = f64(number) / (std.math.pow(f64, f64(10), f64(1 + std.math.log10(number))));
+                const whole = f64(whole_part) + frac_part;
+
+                if (is_neg_exp) {
+                    whole / std.math.pow(f64, 10, f64(exp))
+                } else {
+                    whole * std.math.pow(f64, 10, f64(exp))
+                }
+            },
+
+            'p', 'P' => {
+                @panic("handle hex float exponent");
+            },
+
+            else => {
+                const frac_part = f64(number) / (std.math.pow(f64, f64(10), f64(1 + std.math.log10(number))));
+                f64(whole_part) + frac_part
+            },
         }
     }
 
@@ -476,33 +521,23 @@ pub const Tokenizer = struct {
     //
     // TODO: Use big integer generally improve here.
     fn consumeNumber(self: &Self, comptime radix: u8, init_value: ?u8) -> %IntOrFloat {
-        var number: u64 = if (init_value) |v| {
+        var init_number: u64 = if (init_value) |v| {
             %return getDigitValueForRadix(radix, v)
         } else {
             0
         };
 
-        while (true) {
-            switch (self.peek(0)) {
-                '0' ... '9', 'a' ... 'f', 'A' ... 'F' => |c| {
-                    self.bump(1);
-                    number *= radix;
-                    number += %return getDigitValueForRadix(radix, c);
-                },
+        const number = %return self.consumeInteger(radix, init_number);
 
-                '.' => {
-                    self.bump(1);
-                    return IntOrFloat.Float {
-                        %return self.consumeFloat(radix, number)
-                    };
-                },
-
-                else => {
-                    // TODO: Need to be separated by a non-symbol token.
-                    // Raise an error if we find a non-alpha-numeric that doesn't fit.
-                    return IntOrFloat.Int { number };
-                },
-            }
+        // TODO: Need to be separated by a non-symbol token.
+        // Raise an error if we find a non-alpha-numeric that doesn't fit. Do at caller?
+        //
+        // i.e. 1230174ADAKHJ is invalid.
+        if (self.peek(0) == '.') {
+            self.bump(1);
+            IntOrFloat.Float { %return self.consumeFloatFractional(radix, number) }
+        } else {
+            IntOrFloat.Int { number }
         }
     }
 
