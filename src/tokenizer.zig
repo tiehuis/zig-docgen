@@ -190,6 +190,11 @@ fn getKeywordId(symbol: []const u8) -> ?TokenId {
 error BadValueForRadix;
 error ValueOutOfRange;
 
+const IntOrFloat = enum {
+    Int: u64,   // TODO: Convert back to u128 when __floatuntidf implemented.
+    Float: f64,
+};
+
 /// Returns the digit value of the specified character under the specified radix.
 ///
 /// If the value is too large, an error is returned.
@@ -211,7 +216,8 @@ fn getDigitValueForRadix(comptime radix: u8, c: u8) -> %u8 {
 /// Extra data associated with a particular token.
 pub const TokenData = enum {
     InternPoolRef: []const u8,
-    Integer: u128,
+    Integer: u64,
+    Float: f64, // TODO: Could change to an f128 (or arbitrary-precision) when printing works
     Char: u8,
     Error: error,
 };
@@ -254,6 +260,9 @@ pub const Token = struct {
                 TokenData.Integer => |i| {
                     %return printf("{}", i);
                 },
+                TokenData.Float => |f| {
+                    %return printf("{}", f);
+                },
                 TokenData.Char => |c| {
                     %return printCharEscaped(c);
                 },
@@ -282,7 +291,7 @@ error InvalidCharacter;
 error InvalidCharacterAfterBackslash;
 error MissingCharLiteralData;
 error ExtraCharLiteralData;
-error Consumed;
+error EofWhileParsingLiteral;
 
 fn u8eql(a: []const u8, b: []const u8) -> bool {
     std.mem.eql(u8, a, b)
@@ -426,6 +435,30 @@ pub const Tokenizer = struct {
 
     // Actual processing helper routines.
 
+    /// Process a float with the specified radix starting from the decimal part.
+    ///
+    /// The non-decimal portion should have been processed by `consumeNumber`.
+    fn consumeFloat(self: &Self, comptime radix: u8, whole_part: u64) -> %f64 {
+        // TODO: Handle hex float syntax and e syntax
+        var number: u64 = 0;
+        var digits_count: usize = 1;
+
+        while (true) {
+            switch (self.peek(0)) {
+                '0' ... '9', 'a' ... 'f', 'A' ... 'F' => |c| {
+                    self.bump(1);
+                    number *= radix;
+                    number += %return getDigitValueForRadix(radix, c);
+                },
+
+                else => {
+                    const frac_part = f64(number) / (std.math.pow(f64, f64(10), f64(1 + std.math.log10(number))));
+                    return f64(whole_part) + frac_part;
+                },
+            }
+        }
+    }
+
     /// Processes integer with the specified radix.
     ///
     /// The integer will be represented by an unsigned value.
@@ -433,9 +466,8 @@ pub const Tokenizer = struct {
     /// This will only modify the current stream position.
     //
     // TODO: Use big integer generally improve here.
-    // TODO: Handle float seperately.
-    fn consumeNumber(self: &Self, comptime radix: u8, init_value: ?u8) -> %u128 {
-        var number: u128 = if (init_value) |v| {
+    fn consumeNumber(self: &Self, comptime radix: u8, init_value: ?u8) -> %IntOrFloat {
+        var number: u64 = if (init_value) |v| {
             %return getDigitValueForRadix(radix, v)
         } else {
             0
@@ -449,15 +481,20 @@ pub const Tokenizer = struct {
                     number += %return getDigitValueForRadix(radix, c);
                 },
 
+                '.' => {
+                    self.bump(1);
+                    return IntOrFloat.Float {
+                        %return self.consumeFloat(radix, number)
+                    };
+                },
+
                 else => {
                     // TODO: Need to be separated by a non-symbol token.
                     // Raise an error if we find a non-alpha-numeric that doesn't fit.
-                    break;
+                    return IntOrFloat.Int { number };
                 },
             }
         }
-
-        number
     }
 
     /// Process a character code of the specified length and type.
@@ -598,7 +635,7 @@ pub const Tokenizer = struct {
                 },
 
                 0 => {
-                    @panic("eof while parsing string literal!");
+                    return error.EofWhileParsingLiteral;
                 },
 
                 else => |c| {
@@ -612,8 +649,8 @@ pub const Tokenizer = struct {
     }
 
     /// Process a line comment, returning the encountered characters
-    // TODO: For comments, do we want to strip leading whitespace here (and trailing)?
-    // Any reason to preserve at till later?
+    // NOTE: We do not want to strip whitespace from comments since things like diagrams may require
+    // it to be formatted correctly. We could do trailing but don't bother right now.
     fn consumeUntilNewline(self: &Self) -> %ArrayList(u8) {
         var comment = ArrayList(u8).init(&debug.global_allocator);
         %defer comment.deinit();
@@ -634,9 +671,9 @@ pub const Tokenizer = struct {
     }
 
     /// Return the next token from the buffer.
-    pub fn next(t: &Self) -> %&const Token {
+    pub fn next(t: &Self) -> %?&const Token {
         if (t.consumed) {
-            return error.Consumed;
+            return null;
         }
 
         t.beginToken();
@@ -705,14 +742,30 @@ pub const Tokenizer = struct {
                         },
                     };
 
-                    (??t.c_token).data = TokenData.Integer { value };
-                    %return t.setEndToken(TokenId.IntLiteral);
+                    switch (value) {
+                        IntOrFloat.Int => |i| {
+                            (??t.c_token).data = TokenData.Integer { i };
+                            %return t.setEndToken(TokenId.IntLiteral);
+                        },
+                        IntOrFloat.Float => |f| {
+                            (??t.c_token).data = TokenData.Float { f };
+                            %return t.setEndToken(TokenId.FloatLiteral);
+                        },
+                    }
                 },
 
                 '1' ... '9' => {
                     const value = %return t.consumeNumber(10, ch);
-                    (??t.c_token).data = TokenData.Integer { value };
-                    %return t.setEndToken(TokenId.IntLiteral);
+                    switch (value) {
+                        IntOrFloat.Int => |i| {
+                            (??t.c_token).data = TokenData.Integer { i };
+                            %return t.setEndToken(TokenId.IntLiteral);
+                        },
+                        IntOrFloat.Float => |f| {
+                            (??t.c_token).data = TokenData.Float { f };
+                            %return t.setEndToken(TokenId.FloatLiteral);
+                        },
+                    }
                 },
 
                 '"' => {
@@ -1076,6 +1129,10 @@ pub const Tokenizer = struct {
                             }
                         },
 
+                        0 => {
+                            return error.EofWhileParsingLiteral;
+                        },
+
                         else => {
                             if (t.peek(1) != '\'') {
                                 return error.ExtraCharLiteralData;
@@ -1129,8 +1186,11 @@ pub const Tokenizer = struct {
         // This iterates over the entire buffer. Tokens are returned as references but are still
         // stored in the `tokens` field.
         while (true) {
-            if (t.next()) |_| {} else |err| switch (err) {
-                error.Consumed => break,
+            if (t.next()) |ch| {
+                if (ch == null) {
+                    break;
+                }
+            } else |err| switch (err) {
                 else => return err,
             }
         }

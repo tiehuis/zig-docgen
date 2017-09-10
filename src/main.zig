@@ -33,7 +33,7 @@ fn commandParse(buf: &Buffer) {
 }
 
 pub fn main() -> %void {
-    var action = Action.None;
+    var action = Action.Tokenize;
 
     { var i: usize = 1; while (i < os.args.count()) : (i += 1) {
         const arg = os.args.at(i);

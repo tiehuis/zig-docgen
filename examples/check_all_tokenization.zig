@@ -31,3 +31,5 @@ const a =
 ;
 
 @import("std").io.stdout.printf("{}\t{}\r{}\t{}\n" "{}\\t{}\\r{}\\t{}\\n", a, b, c, d);
+
+1.012307124 -123 -1.1
