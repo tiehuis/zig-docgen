@@ -264,7 +264,9 @@ pub const Token = struct {
                     %return printf("{}", i);
                 },
                 TokenData.Float => |f| {
-                    %return printf("{}", f);
+                    // Temporarily don't print floating points to work around issue #375.
+                    %return printf("float");
+                    // %return printf("{}", f);
                 },
                 TokenData.Char => |c| {
                     %return printCharEscaped(c);
