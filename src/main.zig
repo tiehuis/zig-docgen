@@ -58,7 +58,7 @@ pub fn main() -> %void {
     // TODO: Allow reading from a file and not just stdin
     var is = io.stdin;
 
-    var buf = Buffer.initNull(&debug.global_allocator);
+    var buf = Buffer.initNull(&c_alloc.c_allocator);
     defer buf.deinit();
     is.readAll(&buf) %% |err| {
         %%io.stderr.printf("unable to read input stream: {}\n", @errorName(err));
