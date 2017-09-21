@@ -36,3 +36,5 @@ const a =
 
 // NOTE: 1.1e8 supposedly 1.1e11? check if print issue or parse issue
 1.1e8 2.1e+12 4213091.7e-2
+
+0xaaaaaa.0p-23 0xaddf23.1p24 0x0.3p10

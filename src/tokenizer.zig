@@ -447,19 +447,59 @@ pub const Tokenizer = struct {
     /// Consume an entire integer of the specified radix.
     fn consumeInteger(self: &Self, comptime radix: u8, init_value: u64) -> %u64 {
         var number = init_value;
+        var overflowed = false;
 
         while (true) {
             const ch = self.peek(0);
 
-            // A bad value does not mean we should fail tokenization here.
             const value = if (getDigitValueForRadix(radix, ch)) |ok| {
                 self.bump(1);
-                number *= radix;
-                number += ok;
+
+                // TODO: Need arbitrary precision to handle this overflow
+                if (!overflowed) {
+                    {
+                        const previous_number = number;
+                        if (@mulWithOverflow(u64, number, radix, &number)) {
+                            // Revert to previous as this will give partially accurate values for
+                            // floats at least.
+                            number = previous_number;
+                            overflowed = true;
+                        }
+                    }
+
+                    {
+                        const previous_number = number;
+                        if (@addWithOverflow(u64, number, ok, &number)) {
+                            number = previous_number;
+                            overflowed = true;
+                        }
+                    }
+                }
             } else |_| {
                 return number;
             };
         }
+    }
+
+    /// Consumes a decimal exponent for a float.
+    ///
+    /// This includes an optional leading +, -.
+    fn consumeFloatExponent(self: &Self, exponent_sign: &bool) -> %u64 {
+        *exponent_sign = switch (self.peek(0)) {
+            '-' => {
+                self.bump(1);
+                true
+            },
+            '+' => {
+                self.bump(1);
+                false
+            },
+            else => {
+                false
+            },
+        };
+
+        self.consumeInteger(10, 0)
     }
 
     /// Process a float with the specified radix starting from the decimal part.
@@ -468,32 +508,28 @@ pub const Tokenizer = struct {
     fn consumeFloatFractional(self: &Self, comptime radix: u8, whole_part: u64) -> %f64 {
         debug.assert(radix == 10 or radix == 16);
 
-        // TODO: Handle hex float syntax
         var number = %return self.consumeInteger(radix, 0);
 
         switch (self.peek(0)) {
             'e', 'E' => {
                 self.bump(1);
 
-                const is_neg_exp = switch (self.peek(0)) {
-                    '-' => {
-                        self.bump(1);
-                        true
-                    },
-                    '+' => {
-                        self.bump(1);
-                        false
-                    },
-                    else => {
-                        false
-                    },
+                var is_neg_exp: bool = undefined;
+                var exp = %return self.consumeFloatExponent(&is_neg_exp);
+
+                const whole = if (number != 0) {
+                    const digit_count = usize(1 + std.math.log10(number));
+                    var frac_part = f64(number);
+
+                    var i: usize = 0;
+                    while (i < digit_count) : (i += 1) {
+                        frac_part /= 10;
+                    }
+
+                    f64(whole_part) + frac_part
+                } else {
+                    f64(whole_part)
                 };
-
-                var exp = %return self.consumeInteger(radix, 0);
-
-                // TODO: Deduplicate + add integer pow function variant to avoid cast.
-                const frac_part = f64(number) / (std.math.pow(f64, f64(10), f64(1 + std.math.log10(number))));
-                const whole = f64(whole_part) + frac_part;
 
                 if (is_neg_exp) {
                     whole / std.math.pow(f64, 10, f64(exp))
@@ -503,7 +539,30 @@ pub const Tokenizer = struct {
             },
 
             'p', 'P' => {
-                @panic("handle hex float exponent");
+                self.bump(1);
+
+                var is_neg_exp: bool = undefined;
+                var exp = %return self.consumeFloatExponent(&is_neg_exp);
+
+                const whole = if (number != 0) {
+                    const digit_count = usize(1 + std.math.log(f64, 16, f64(number)));
+                    var frac_part = f64(number);
+
+                    var i: usize = 0;
+                    while (i < digit_count) : (i += 1) {
+                        frac_part /= 10;
+                    }
+
+                    f64(whole_part) + frac_part
+                } else {
+                    f64(whole_part)
+                };
+
+                if (is_neg_exp) {
+                    whole / std.math.pow(f64, 2, f64(exp))
+                } else {
+                    whole * std.math.pow(f64, 2, f64(exp))
+                }
             },
 
             else => {
