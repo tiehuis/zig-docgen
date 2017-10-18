@@ -4,7 +4,8 @@ const io = std.io;
 const debug = std.debug;
 const Buffer = std.Buffer;
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
-const c_alloc = @import("c_allocator.zig");
+const Parser = @import("parser.zig").Parser;
+const mem = std.mem;
 
 const Action = enum {
     Tokenize,
@@ -23,7 +24,7 @@ fn printUsage() {
 }
 
 fn commandTokenize(buf: &Buffer) {
-    var tkr = Tokenizer.init(&c_alloc.c_allocator);
+    var tkr = Tokenizer.init(&mem.c_allocator);
 
     _ = %%tkr.process(buf.toSliceConst());
     for (tkr.tokens.toSliceConst()) |token| {
@@ -38,8 +39,11 @@ fn commandParse(buf: &Buffer) {
 pub fn main() -> %void {
     var action = Action.Tokenize;
 
-    { var i: usize = 1; while (i < os.args.count()) : (i += 1) {
-        const arg = os.args.at(i);
+    var args = os.args();
+    const program_name = ??args.next(&mem.c_allocator);
+
+    while (args.next(&mem.c_allocator)) |err_arg| {
+        const arg = %%err_arg;
 
         if (std.mem.eql(u8, arg, "--tokenize")) {
             action = Action.Tokenize;
@@ -53,12 +57,12 @@ pub fn main() -> %void {
             printUsage();
             os.exit(1);
         }
-    }}
+    }
 
     // TODO: Allow reading from a file and not just stdin
     var is = io.stdin;
 
-    var buf = Buffer.initNull(&c_alloc.c_allocator);
+    var buf = Buffer.initNull(&mem.c_allocator);
     defer buf.deinit();
     is.readAll(&buf) %% |err| {
         %%io.stderr.printf("unable to read input stream: {}\n", @errorName(err));
