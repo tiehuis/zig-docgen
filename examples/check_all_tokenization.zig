@@ -34,7 +34,7 @@ const a =
 
 1.012307124 -123 -1.1
 
-// NOTE: 1.1e8 supposedly 1.1e11? check if print issue or parse issue
-1.1e8 2.1e+12 4213091.7e-2
+//Here is a comment
+1.1e8 2.1e+12 4213091.7e-2 0.0 -0.0
 
 0xaaaaaa.0p-23 0xaddf23.1p24 0x0.3p10
